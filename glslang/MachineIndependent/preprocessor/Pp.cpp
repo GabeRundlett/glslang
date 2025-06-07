@@ -1303,8 +1303,8 @@ MacroExpandResult TPpContext::MacroExpand(TPpToken* ppToken, bool expandUndef, b
 
             if (token == ')') {
                 // closing paren of call
-                if (in->mac->args.size() == 1 && !tokenRecorded)
-                    break;
+                // if (in->mac->args.size() == 1 && !tokenRecorded)
+                //     break;
                 arg++;
                 break;
             }

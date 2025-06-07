@@ -2642,7 +2642,16 @@ Id Builder::createVariable(Decoration precision, StorageClass storageClass, Id t
     Id pointerType = makePointer(storageClass, type);
     Instruction* inst = new Instruction(getUniqueId(), pointerType, Op::OpVariable);
     inst->addImmediateOperand(storageClass);
-    if (initializer != NoResult)
+    if (initializer == NoResult)
+    {
+        if ((isAggregateType(type) || isVectorType(type) || isScalarType(type)) && 
+            (storageClass == StorageClass::Function))
+        {
+            initializer = makeNullConstant(type);
+            inst->addIdOperand(initializer);
+        }
+    }
+    else
         inst->addIdOperand(initializer);
 
     switch (storageClass) {
