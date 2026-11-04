@@ -654,6 +654,9 @@ void TIntermediate::mergeModes(TInfoSink& infoSink, TIntermediate& unit)
     MERGE_TRUE(useUnknownFormat);
     MERGE_TRUE(hlslOffsets);
     MERGE_TRUE(useStorageBuffer);
+    MERGE_TRUE(clampDynamicIndices);
+    if (unit.loopIterationLimit != 0 && (loopIterationLimit == 0 || unit.loopIterationLimit < loopIterationLimit))
+        loopIterationLimit = unit.loopIterationLimit;
     MERGE_TRUE(invariantAll);
     MERGE_TRUE(hlslIoMapping);
 

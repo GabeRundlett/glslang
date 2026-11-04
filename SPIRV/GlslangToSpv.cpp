@@ -2399,6 +2399,32 @@ bool TGlslangToSpvTraverser::visitBinary(glslang::TVisit /* visit */, glslang::T
             node->getRight()->traverse(this);
             spv::Id index = accessChainLoad(node->getRight()->getType());
 
+            // #pragma clamp_dynamic_indices: clamp the index into [0, size-1] when the size is known at
+            // compile time (like WebGL implementations do). Out-of-bounds indexing is undefined behavior and
+            // can crash the GPU. Unsized/runtime arrays (e.g. bindless descriptor arrays) are left alone.
+            if (glslangIntermediate->isClampDynamicIndices()) {
+                const glslang::TType& leftType = node->getLeft()->getType();
+                int size = 0;
+                if (leftType.isArray()) {
+                    if (leftType.isSizedArray() && leftType.getOuterArrayNode() == nullptr)
+                        size = leftType.getOuterArraySize();
+                } else if (leftType.isMatrix()) {
+                    size = leftType.getMatrixCols();
+                } else if (leftType.isVector()) {
+                    size = leftType.getVectorSize();
+                }
+                spv::Id indexType = builder.getTypeId(index);
+                if (size > 0 && builder.isScalarType(indexType) && builder.getScalarTypeWidth(indexType) == 32) {
+                    if (builder.isUintType(indexType)) {
+                        index = builder.createBuiltinCall(indexType, stdBuiltins, spv::GLSLstd450UMin,
+                                                          {index, builder.makeUintConstant(static_cast<unsigned>(size - 1))});
+                    } else if (builder.isIntType(indexType)) {
+                        index = builder.createBuiltinCall(indexType, stdBuiltins, spv::GLSLstd450SClamp,
+                                                          {index, builder.makeIntConstant(0), builder.makeIntConstant(size - 1)});
+                    }
+                }
+            }
+
             addIndirectionIndexCapabilities(node->getLeft()->getType(), node->getRight()->getType());
 
             // restore the saved access chain
@@ -4656,6 +4682,18 @@ void TGlslangToSpvTraverser::visitConstantUnion(glslang::TIntermConstantUnion* n
 
 bool TGlslangToSpvTraverser::visitLoop(glslang::TVisit /* visit */, glslang::TIntermLoop* node)
 {
+    // #pragma loop_iteration_limit(N): count the iterations of this loop (reset every time the loop is
+    // entered) and break out of it once N iterations have run. This guarantees termination of loops whose
+    // trip count depends on undefined behavior (e.g. int(inf)), which would otherwise hang the GPU.
+    const unsigned int loopIterationLimit = glslangIntermediate->getLoopIterationLimit();
+    spv::Id loopCounterType = spv::NoResult;
+    spv::Id loopCounter = spv::NoResult;
+    if (loopIterationLimit != 0) {
+        loopCounterType = builder.makeUintType(32);
+        loopCounter = builder.createVariable(spv::NoPrecision, spv::StorageClass::Function, loopCounterType, "loop_iteration_count");
+        builder.createStore(builder.makeUintConstant(0), loopCounter);
+    }
+
     auto blocks = builder.makeNewLoop();
     builder.createBranch(true, &blocks.head);
 
@@ -4672,6 +4710,21 @@ bool TGlslangToSpvTraverser::visitLoop(glslang::TVisit /* visit */, glslang::TIn
     builder.setBuildPoint(&blocks.head);
     builder.setDebugSourceLocation(node->getLoc().line, node->getLoc().getFilename());
     builder.createLoopMerge(&blocks.merge, &blocks.continue_target, control, operands);
+    if (loopCounter != spv::NoResult) {
+        // The header block may only contain the merge and a branch, so the guard gets its own block.
+        // Branching to the merge block from inside the loop is a structured 'break'.
+        spv::Block& guard = builder.makeNewBlock();
+        builder.createBranch(true, &guard);
+        builder.setBuildPoint(&guard);
+        spv::Id count = builder.createLoad(loopCounter, spv::NoPrecision);
+        spv::Id nextCount = builder.createBinOp(spv::Op::OpIAdd, loopCounterType, count, builder.makeUintConstant(1));
+        builder.createStore(nextCount, loopCounter);
+        spv::Id withinLimit = builder.createBinOp(spv::Op::OpULessThanEqual, builder.makeBoolType(), nextCount,
+                                                  builder.makeUintConstant(loopIterationLimit));
+        spv::Block& afterGuard = builder.makeNewBlock();
+        builder.createConditionalBranch(withinLimit, &afterGuard, &blocks.merge);
+        builder.setBuildPoint(&afterGuard);
+    }
     if (node->testFirst() && node->getTest()) {
         spv::Block& test = builder.makeNewBlock();
         builder.createBranch(true, &test);

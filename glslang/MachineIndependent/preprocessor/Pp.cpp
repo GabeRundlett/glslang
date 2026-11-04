@@ -461,7 +461,8 @@ int TPpContext::eval(int token, int precedence, bool shortCircuit, int& res, boo
             token = evalToToken(token, shortCircuit, res, err, ppToken);
             return eval(token, precedence, shortCircuit, res, err, ppToken);
         }
-    } else if (token == PpAtomConstInt) {
+    } else if (token == PpAtomConstInt || token == PpAtomConstUint) {
+        // Unsigned literals ("#if X == 64u") are accepted by WebGL implementations, so accept them here too.
         res = ppToken->ival;
         token = scanToken(ppToken);
     } else if (token == '(') {

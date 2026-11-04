@@ -386,6 +386,31 @@ void TParseContext::handlePragma(const TSourceLoc& loc, const TVector<TString>& 
             error(loc, "\")\" expected to end 'debug' pragma", "#pragma", "");
             return;
         }
+    } else if (tokens[0].compare("loop_iteration_limit") == 0) {
+        // #pragma loop_iteration_limit(N)
+        if (tokens.size() != 4 || tokens[1].compare("(") != 0 || tokens[3].compare(")") != 0) {
+            error(loc, "loop_iteration_limit pragma syntax is incorrect, expected loop_iteration_limit(N)", "#pragma", "");
+            return;
+        }
+        char* end = nullptr;
+        unsigned long limit = strtoul(tokens[2].c_str(), &end, 10);
+        if (end == tokens[2].c_str() || *end != '\0' || limit == 0 || limit > 0x7fffffffu) {
+            error(loc, "loop_iteration_limit expects a positive integer", "#pragma", "");
+            return;
+        }
+        intermediate.setLoopIterationLimit(static_cast<unsigned int>(limit));
+    } else if (tokens[0].compare("clamp_dynamic_indices") == 0) {
+        if (tokens.size() != 1)
+            error(loc, "extra tokens", "#pragma", "");
+        intermediate.setClampDynamicIndices();
+    } else if (tokens[0].compare("zero_initialize_variables") == 0) {
+        if (tokens.size() != 1)
+            error(loc, "extra tokens", "#pragma", "");
+        intermediate.setZeroInitializeVariables();
+    } else if (tokens[0].compare("relaxed_global_const_initializers") == 0) {
+        if (tokens.size() != 1)
+            error(loc, "extra tokens", "#pragma", "");
+        intermediate.setRelaxedGlobalConstInitializers();
     } else if (spvVersion.spv > 0 && tokens[0].compare("use_storage_buffer") == 0) {
         if (tokens.size() != 1)
             error(loc, "extra tokens", "#pragma", "");
@@ -8362,6 +8387,52 @@ TIntermTyped* TParseContext::vkRelaxedRemapDotDereference(const TSourceLoc&, TIn
 // 'publicType' is the type part of the declaration (to the left)
 // 'arraySizes' is the arrayness tagged on the identifier (to the right)
 //
+// Fills 'zeros' (starting at 'index') with a zero constant for every scalar component of 'type'.
+// Returns false for types that have no zero constant representation.
+static bool fillZeroConstants(const TType& type, TConstUnionArray& zeros, int& index)
+{
+    if (type.isArray()) {
+        if (!type.isSizedArray())
+            return false;
+        TType elementType(type, 0);
+        for (int i = 0; i < type.getOuterArraySize(); ++i) {
+            if (!fillZeroConstants(elementType, zeros, index))
+                return false;
+        }
+        return true;
+    }
+    if (type.isStruct()) {
+        for (const TTypeLoc& member : *type.getStruct()) {
+            if (!fillZeroConstants(*member.type, zeros, index))
+                return false;
+        }
+        return true;
+    }
+    const int count = type.computeNumComponents();
+    for (int i = 0; i < count; ++i, ++index) {
+        if (index >= zeros.size())
+            return false;
+        switch (type.getBasicType()) {
+        case EbtFloat:
+        case EbtDouble:
+        case EbtFloat16:
+            zeros[index].setDConst(0.0);
+            break;
+        case EbtInt: zeros[index].setIConst(0); break;
+        case EbtUint: zeros[index].setUConst(0); break;
+        case EbtBool: zeros[index].setBConst(false); break;
+        case EbtInt8: zeros[index].setI8Const(0); break;
+        case EbtUint8: zeros[index].setU8Const(0); break;
+        case EbtInt16: zeros[index].setI16Const(0); break;
+        case EbtUint16: zeros[index].setU16Const(0); break;
+        case EbtInt64: zeros[index].setI64Const(0); break;
+        case EbtUint64: zeros[index].setU64Const(0); break;
+        default: return false;
+        }
+    }
+    return true;
+}
+
 TIntermNode* TParseContext::declareVariable(const TSourceLoc& loc, TString& identifier, const TPublicType& publicType,
     TArraySizes* arraySizes, TIntermTyped* initializer)
 {
@@ -8544,6 +8615,25 @@ TIntermNode* TParseContext::declareVariable(const TSourceLoc& loc, TString& iden
             return nullptr;
         }
         initNode = executeInitializer(loc, initializer, variable);
+    } else if (symbol != nullptr && intermediate.isZeroInitializeVariables()) {
+        // #pragma zero_initialize_variables: like WebGL implementations, give user-declared variables without
+        // an initializer a zero initializer at the point of declaration ("T x;" -> "T x = T(0);").
+        TVariable* variable = symbol->getAsVariable();
+        TStorageQualifier storage = type.getQualifier().storage;
+        if (variable != nullptr && (storage == EvqTemporary || storage == EvqGlobal) && !type.containsOpaque() &&
+            !type.containsBasicType(EbtReference) && !type.containsCoopMat() && !type.containsBasicType(EbtSpirvType) &&
+            !(type.isArray() && !type.isSizedArray())) {
+            TConstUnionArray zeros(type.computeNumComponents());
+            int index = 0;
+            if (fillZeroConstants(type, zeros, index)) {
+                TType constType;
+                constType.deepCopy(type);
+                constType.getQualifier().makeTemporary();
+                constType.getQualifier().storage = EvqConst;
+                TIntermTyped* zero = intermediate.addConstantUnion(zeros, constType, loc);
+                initNode = executeInitializer(loc, zero, variable);
+            }
+        }
     }
 
     // look for errors in layout qualifier use
@@ -8703,10 +8793,18 @@ TIntermNode* TParseContext::executeInitializer(const TSourceLoc& loc, TIntermTyp
     }
     // Global consts require a constant initializer (specialization constant is okay)
     if (qualifier == EvqConst && symbolTable.atGlobalLevel() && ! initializer->getType().getQualifier().isConstant()) {
-        error(loc, "global const initializers must be constant", "=", "'%s'",
-              variable->getType().getCompleteString(intermediate.getEnhancedMsgs()).c_str());
-        variable->getWritableType().getQualifier().makeTemporary();
-        return nullptr;
+        if (intermediate.isRelaxedGlobalConstInitializers()) {
+            // #pragma relaxed_global_const_initializers: demote to a regular global initialized at runtime,
+            // as WebGL implementations do (e.g. "const float x = intBitsToFloat(...);").
+            warn(loc, "global const initializer is not constant, treating the variable as a non-const global", "=", "");
+            variable->getWritableType().getQualifier().storage = EvqGlobal;
+            qualifier = EvqGlobal;
+        } else {
+            error(loc, "global const initializers must be constant", "=", "'%s'",
+                  variable->getType().getCompleteString(intermediate.getEnhancedMsgs()).c_str());
+            variable->getWritableType().getQualifier().makeTemporary();
+            return nullptr;
+        }
     }
 
     // Const variables require a constant initializer, depending on version

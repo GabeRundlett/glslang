@@ -619,6 +619,19 @@ public:
 
     void setUseStorageBuffer() { useStorageBuffer = true; }
     bool usingStorageBuffer() const { return useStorageBuffer; }
+    // Desktop-shadertoy robustness extensions, enabled via
+    //   #pragma loop_iteration_limit(N)   every loop breaks after N iterations (per loop entry)
+    //   #pragma clamp_dynamic_indices     dynamic indices into fixed-size arrays/matrices/vectors are clamped in-bounds
+    void setLoopIterationLimit(unsigned int limit) { loopIterationLimit = limit; }
+    unsigned int getLoopIterationLimit() const { return loopIterationLimit; }
+    void setClampDynamicIndices() { clampDynamicIndices = true; }
+    bool isClampDynamicIndices() const { return clampDynamicIndices; }
+    //   #pragma zero_initialize_variables  variables declared without initializer are initialized to zero
+    void setZeroInitializeVariables() { zeroInitializeVariables = true; }
+    bool isZeroInitializeVariables() const { return zeroInitializeVariables; }
+    //   #pragma relaxed_global_const_initializers  global consts with non-constant initializers become regular globals
+    void setRelaxedGlobalConstInitializers() { relaxedGlobalConstInitializers = true; }
+    bool isRelaxedGlobalConstInitializers() const { return relaxedGlobalConstInitializers; }
     void setInvariantAll() { invariantAll = true; }
     bool isInvariantAll() const { return invariantAll; }
     void setDepthReplacing() { depthReplacing = true; }
@@ -1212,6 +1225,10 @@ protected:
     bool enhancedMsgs;
     bool debugInfo;
     bool useStorageBuffer;
+    unsigned int loopIterationLimit = 0;
+    bool clampDynamicIndices = false;
+    bool zeroInitializeVariables = false;
+    bool relaxedGlobalConstInitializers = false;
     bool invariantAll;
     bool nanMinMaxClamp;            // true if desiring min/max/clamp to favor non-NaN over NaN
     bool depthReplacing;
